@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
-import { mkdtemp, rm, cp, stat, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, cp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, relative, dirname } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 const FALLBACK_PLUGIN = `{
@@ -31,6 +30,10 @@ shortDescription:"Control Mac apps from Codex"
 name:"computer-use"
 }
 }`.replace(/\n/g, "");
+
+const INSTALLED_FALLBACK_PLUGIN = FALLBACK_PLUGIN
+  .replace("enabled:!1", "enabled:!0")
+  .replace("installed:!1", "installed:!0");
 
 const usage = `Usage:
   ./patch-codex-computer-use.mjs /path/to/Codex.app
@@ -101,6 +104,10 @@ function replaceOnce(text, matcher, replacement, label, changes) {
 
 function syntheticPluginFunction(name) {
   return `function ${name}(){return ${FALLBACK_PLUGIN}}`;
+}
+
+function syntheticInstalledPluginFunction(name) {
+  return `function ${name}(){return ${INSTALLED_FALLBACK_PLUGIN}}`;
 }
 
 async function patchMainFeatureAvailability(root, summary) {
@@ -188,6 +195,66 @@ async function patchUseModelSettings(root, summary) {
   }
 }
 
+async function patchComputerUseWebviewAvailability(root, summary) {
+  const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
+  let patched = false;
+  let candidates = 0;
+  for (const file of assets) {
+    let text = await readText(file);
+    if (!text.includes("featureName:`computer_use`")) continue;
+    candidates += 1;
+    const changes = [];
+
+    text = replaceOnce(
+      text,
+      /function\s+([A-Za-z_$][\w$]*)\(e\)\{let\s+([A-Za-z_$][\w$]*)=\(0,[A-Za-z_$][\w$]*\.c\)\(8\),\{enabled:([A-Za-z_$][\w$]*),hostId:([A-Za-z_$][\w$]*),isHostLocal:([A-Za-z_$][\w$]*)\}=e,[\s\S]*?return\s+\2\[\d+\]!==[A-Za-z_$][\w$]*\|\|\2\[\d+\]!==[A-Za-z_$][\w$]*\|\|\2\[\d+\]!==[A-Za-z_$][\w$]*\?\([A-Za-z_$][\w$]*=\{available:[A-Za-z_$][\w$]*,isFetching:[A-Za-z_$][\w$]*,isLoading:[A-Za-z_$][\w$]*\},\2\[\d+\]=[A-Za-z_$][\w$]*,\2\[\d+\]=[A-Za-z_$][\w$]*,\2\[\d+\]=[A-Za-z_$][\w$]*,\2\[\d+\]=[A-Za-z_$][\w$]*\):[A-Za-z_$][\w$]*=\2\[\d+\],[A-Za-z_$][\w$]*\}/,
+      "function $1(e){return{available:!0,isFetching:!1,isLoading:!1}}",
+      "webview computer use availability",
+      changes,
+    );
+
+    if (changes.length > 0) {
+      await writeText(file, text);
+      summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
+      patched = true;
+    }
+  }
+  if (!patched) {
+    if (candidates > 0) summary.skipped.push("webview computer use availability already patched");
+    else summary.missing.push("webview computer use availability");
+  }
+}
+
+async function patchPluginAvailabilityFilter(root, summary) {
+  const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
+  let patched = false;
+  let candidates = 0;
+  for (const file of assets) {
+    let text = await readText(file);
+    if (!text.includes("isComputerUseAvailable") || !text.includes("computer-use")) continue;
+    candidates += 1;
+    const changes = [];
+
+    text = replaceOnce(
+      text,
+      /function\s+([A-Za-z_$][\w$]*)\(e,\{isComputerUseAvailable:([A-Za-z_$][\w$]*),isExternalBrowserUseAvailable:([A-Za-z_$][\w$]*),isInAppBrowserUseAvailable:([A-Za-z_$][\w$]*)\}\)\{return!\(!\4&&([A-Za-z_$][\w$]*)\(e\)\|\|!\3&&([A-Za-z_$][\w$]*)\(e\)\|\|!\2&&([A-Za-z_$][\w$]*)\(e\)\)\}/,
+      "function $1(e,{isComputerUseAvailable:$2,isExternalBrowserUseAvailable:$3,isInAppBrowserUseAvailable:$4}){return!(!$4&&$5(e)||!$3&&$6(e))}",
+      "plugin list computer use filter",
+      changes,
+    );
+
+    if (changes.length > 0) {
+      await writeText(file, text);
+      summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
+      patched = true;
+    }
+  }
+  if (!patched) {
+    if (candidates > 0) summary.skipped.push("plugin list computer use filter already patched");
+    else summary.missing.push("plugin list computer use filter");
+  }
+}
+
 async function patchInstallFlow(root, summary) {
   const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
   let patched = false;
@@ -270,6 +337,18 @@ async function patchComputerUseSettings(root, summary) {
         changes,
       );
     }
+
+    if (!text.includes("codexComputerUseInstalledFallback")) {
+      text = replaceOnce(
+        text,
+        /([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.installedPlugins,([A-Za-z_$][\w$]*)\),([A-Za-z_$][\w$]*)\[(\d+)\]=\3\.installedPlugins,\5\[(\d+)\]=\1\);let\s+([A-Za-z_$][\w$]*)=/,
+        (_match, result, finder, plugins, predicate, cache, installedIndex, resultIndex, nextVar) =>
+          `${result}=${finder}(${plugins}.installedPlugins,${predicate})??${finder}(${plugins}.availablePlugins,${predicate})??codexComputerUseInstalledFallback(),${cache}[${installedIndex}]=${plugins}.installedPlugins,${cache}[${resultIndex}]=${result});${syntheticInstalledPluginFunction("codexComputerUseInstalledFallback")}let ${nextVar}=`,
+        "settings installed fallback",
+        changes,
+      );
+    }
+
     if (changes.length > 0) {
       await writeText(file, text);
       summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
@@ -311,6 +390,64 @@ async function ensureBundledMarketplace(appPath, summary) {
   } else {
     summary.skipped.push("bundled marketplace already has computer-use");
   }
+}
+
+function hasOpenAISignature(appPath) {
+  if (!existsSync(appPath)) return false;
+  const output = spawnSync("codesign", ["-dv", "--verbose=2", appPath], { encoding: "utf8" });
+  const detail = `${output.stdout ?? ""}${output.stderr ?? ""}`;
+  return output.status === 0 && detail.includes("Authority=Developer ID Application: OpenAI OpCo, LLC");
+}
+
+async function ensureHomeComputerUseCache(appPath, options, summary) {
+  const source = join(
+    appPath,
+    "Contents",
+    "Resources",
+    "plugins",
+    "openai-bundled",
+    "plugins",
+    "computer-use",
+  );
+  const pluginJsonPath = join(source, ".codex-plugin", "plugin.json");
+  const sourceApp = join(source, "Codex Computer Use.app");
+  const sourceClient = join(sourceApp, "Contents", "SharedSupport", "SkyComputerUseClient.app");
+  if (!existsSync(pluginJsonPath) || !existsSync(sourceApp) || !existsSync(sourceClient)) {
+    summary.missing.push("bundled computer-use plugin payload");
+    return;
+  }
+
+  const pluginJson = JSON.parse(await readText(pluginJsonPath));
+  const version = pluginJson.version;
+  if (typeof version !== "string" || version.length === 0) {
+    summary.missing.push("bundled computer-use plugin version");
+    return;
+  }
+  if (!/^[0-9A-Za-z._-]+$/.test(version)) {
+    throw new Error(`Unexpected computer-use plugin version: ${version}`);
+  }
+
+  const cache = join(homedir(), ".codex", "plugins", "cache", "openai-bundled", "computer-use", version);
+  const cacheApp = join(cache, "Codex Computer Use.app");
+  const cacheClient = join(cacheApp, "Contents", "SharedSupport", "SkyComputerUseClient.app");
+  const cacheIsSigned = hasOpenAISignature(cacheApp) && hasOpenAISignature(cacheClient);
+  if (cacheIsSigned) {
+    summary.skipped.push(`computer-use cache ${version} already has OpenAI signature`);
+    return;
+  }
+
+  if (options.dryRun) {
+    summary.changed.push(`~/.codex/plugins/cache/openai-bundled/computer-use/${version}: signed cache sync`);
+    return;
+  }
+
+  await mkdir(dirname(cache), { recursive: true });
+  await rm(cache, { recursive: true, force: true });
+  await cp(source, cache, { recursive: true, preserveTimestamps: true });
+  if (!hasOpenAISignature(cacheApp) || !hasOpenAISignature(cacheClient)) {
+    throw new Error("computer-use cache sync did not preserve OpenAI signature");
+  }
+  summary.changed.push(`~/.codex/plugins/cache/openai-bundled/computer-use/${version}: signed cache sync`);
 }
 
 function collectUnpackGlob(appPath) {
@@ -383,10 +520,11 @@ async function main() {
     run("npx", ["--yes", "@electron/asar", "extract", asarPath, work]);
     await patchMainFeatureAvailability(work, summary);
     await patchUseModelSettings(work, summary);
+    await patchComputerUseWebviewAvailability(work, summary);
+    await patchPluginAvailabilityFilter(work, summary);
     await patchInstallFlow(work, summary);
     await patchAuthDetailGate(work, summary);
     await patchComputerUseSettings(work, summary);
-    if (!options.dryRun) await ensureBundledMarketplace(appPath, summary);
 
     const changedJs = summary.changed
       .map((entry) => entry.split(":")[0])
@@ -399,6 +537,7 @@ async function main() {
     }
 
     if (!options.dryRun) {
+      await ensureBundledMarketplace(appPath, summary);
       const unpackGlob = collectUnpackGlob(appPath);
       const packArgs = ["--yes", "@electron/asar", "pack", work, asarPath];
       if (unpackGlob != null) packArgs.push("--unpack", unpackGlob);
@@ -406,6 +545,9 @@ async function main() {
       plistSetAsarHash(infoPlist, asarHeaderHash(asarPath));
       if (options.codesign) run("codesign", ["--force", "--deep", "--sign", "-", appPath]);
       run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath], { capture: true });
+      await ensureHomeComputerUseCache(appPath, options, summary);
+    } else {
+      await ensureHomeComputerUseCache(appPath, options, summary);
     }
 
     console.log(`Changed: ${summary.changed.length}`);
