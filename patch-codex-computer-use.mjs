@@ -36,6 +36,7 @@ const usage = `Usage:
 
 Options:
   --dry-run       Extract and patch temp files only
+  --copy-to PATH  Copy Codex.app to PATH first, then patch the copy
   --no-backup     Do not create .bak-* copies
   --no-codesign   Skip ad-hoc codesign
   --allow-missing Continue even if a known patch point is missing
@@ -43,12 +44,18 @@ Options:
 `;
 
 function parseArgs(argv) {
-  const options = { dryRun: false, backup: true, codesign: true, allowMissing: false };
+  const options = { dryRun: false, copyTo: null, backup: true, codesign: true, allowMissing: false };
   let appPath = null;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--dry-run") options.dryRun = true;
-    else if (arg === "--no-backup") options.backup = false;
+    else if (arg === "--copy-to") {
+      const target = argv[++i];
+      if (target == null) throw new Error("--copy-to requires a path");
+      options.copyTo = resolve(target);
+    } else if (arg.startsWith("--copy-to=")) {
+      options.copyTo = resolve(arg.slice("--copy-to=".length));
+    } else if (arg === "--no-backup") options.backup = false;
     else if (arg === "--no-codesign") options.codesign = false;
     else if (arg === "--allow-missing") options.allowMissing = true;
     else if (arg === "--strict") options.allowMissing = false;
@@ -229,7 +236,7 @@ async function patchInstallFlow(root, summary) {
     );
     text = replaceOnce(
       text,
-      /openPluginInstall:\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)=\{\}\)=>\{([A-Za-z_$][\w$]*)\|\|![^&{}]+&&[A-Za-z_$][\w$]*\(\1\.plugin\.id\)\|\|\(([^{}]+?)\)\}/,
+      /openPluginInstall:\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)=\{\}\)=>\{([A-Za-z_$][\w$]*)\|\|![^&{}]+&&[A-Za-z_$][\w$]*\(\1\.plugin\.id\)\|\|\(([^{}]+?)\)\}/g,
       "openPluginInstall:($1,$2={})=>{$3||($4)}",
       "install modal gate",
       changes,
@@ -238,6 +245,7 @@ async function patchInstallFlow(root, summary) {
       text,
       new RegExp(
         String.raw`openPluginInstall:\((${idPattern()}),(${idPattern()})=\{\}\)=>\{(${idPattern()})\|\|![^|{}]+?\|\|![^|{}]+?\|\|![^|{}]+?\|\|\(`,
+        "g",
       ),
       "openPluginInstall:($1,$2={})=>{$3||(",
       "install modal gate",
@@ -287,6 +295,7 @@ async function patchComputerUseSettings(root, summary) {
   const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
   let patched = false;
   let candidates = 0;
+  let hasFallback = false;
   for (const file of assets) {
     let text = await readText(file);
     if (!text.includes("settings.computerUse.install") && !text.includes("Computer Use plugin unavailable")) continue;
@@ -301,7 +310,20 @@ async function patchComputerUseSettings(root, summary) {
         "settings fallback",
         changes,
       );
+      text = replaceOnce(
+        text,
+        new RegExp(
+          String.raw`=(${idPattern()})\((${idPattern()}\.availablePlugins),(${idPattern()})\)(?=,${idPattern()}\[\d+\]=\2,${idPattern()}\[\d+\]=${idPattern()}\);let\s+${idPattern()}=${idPattern()},)`,
+        ),
+        "=$1($2,$3)??codexComputerUseSettingsFallback()",
+        "settings fallback",
+        changes,
+      );
+      if (changes.includes("settings fallback") && !text.includes("codexComputerUseSettingsFallback")) {
+        text = text.replace(/export\{/, `${syntheticPluginFunction("codexComputerUseSettingsFallback")}export{`);
+      }
     }
+    if (text.includes("codexComputerUseSettingsFallback")) hasFallback = true;
     text = replaceOnce(
       text,
       new RegExp(
@@ -318,10 +340,9 @@ async function patchComputerUseSettings(root, summary) {
       patched = true;
     }
   }
-  if (!patched) {
-    if (candidates > 0) summary.skipped.push("computer use settings fallback already patched");
-    else summary.missing.push("computer use settings fallback");
-  }
+  if (candidates === 0) summary.missing.push("computer use settings fallback");
+  else if (!hasFallback) summary.missing.push("computer use settings fallback");
+  else if (!patched) summary.skipped.push("computer use settings fallback already patched");
 }
 
 async function patchSettingsNavAvailability(root, summary) {
@@ -550,10 +571,23 @@ async function checkJs(files) {
 }
 
 async function main() {
-  const { appPath, options } = parseArgs(process.argv.slice(2));
+  const { appPath: sourceAppPath, options } = parseArgs(process.argv.slice(2));
+  let appPath = sourceAppPath;
+  if (options.copyTo != null && !options.dryRun) {
+    if (existsSync(options.copyTo)) throw new Error(`--copy-to target already exists: ${options.copyTo}`);
+    await mkdir(dirname(options.copyTo), { recursive: true });
+    run("ditto", [sourceAppPath, options.copyTo]);
+    appPath = options.copyTo;
+  }
   const asarPath = join(appPath, "Contents", "Resources", "app.asar");
   const infoPlist = join(appPath, "Contents", "Info.plist");
   if (!existsSync(asarPath) || !existsSync(infoPlist)) throw new Error(`${appPath} is not a packaged Codex.app`);
+  if (options.codesign && !options.dryRun) {
+    const warning = options.copyTo == null
+      ? "Warning: ad-hoc signing removes the official signature and can break Browser/IAB trust. Use --copy-to to keep the original app intact."
+      : "Warning: the patched copy will be ad-hoc signed; the original app remains untouched.";
+    console.warn(warning);
+  }
 
   const tmp = await mkdtemp(join(tmpdir(), "codex-computer-use-patch-"));
   const work = join(tmp, "app");
@@ -606,6 +640,7 @@ async function main() {
       console.log(`Missing: ${summary.missing.join(", ")}`);
     }
     if (options.dryRun) console.log("Dry run only.");
+    if (options.copyTo != null && options.dryRun) console.log(`Copy skipped in dry run: ${options.copyTo}`);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
