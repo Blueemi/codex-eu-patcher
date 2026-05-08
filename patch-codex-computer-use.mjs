@@ -199,7 +199,7 @@ async function patchInstallFlow(root, summary) {
     const changes = [];
     text = replaceOnce(
       text,
-      /if\((![A-Za-z_$][\w$]*&&[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.plugin\.id\))\)\{([A-Za-z_$][\w$]*)\(\);return\}/,
+      /if\((![A-Za-z_$][\w$]*&&[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.plugin\.id\))\)\{([A-Za-z_$][\w$]*)\(\);return\}/g,
       "if(!1&&$1){$2();return}",
       "install auth toast gate",
       changes,
