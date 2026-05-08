@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
-import { mkdtemp, rm, cp, stat, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, relative, dirname } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 const FALLBACK_PLUGIN = `{
@@ -103,6 +102,10 @@ function syntheticPluginFunction(name) {
   return `function ${name}(){return ${FALLBACK_PLUGIN}}`;
 }
 
+function idPattern() {
+  return String.raw`[A-Za-z_$][\w$]*`;
+}
+
 async function patchMainFeatureAvailability(root, summary) {
   const files = (await listFiles(join(root, ".vite", "build"))).filter((file) => file.endsWith(".js"));
   let touched = 0;
@@ -124,6 +127,15 @@ async function patchMainFeatureAvailability(root, summary) {
       /function\s+([A-Za-z_$][\w$]*)\(e,\{env:[^)]*?platform:[^)]*?\}=\{\}\)\{return[\s\S]*?CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE[\s\S]*?\}\}function\s+([A-Za-z_$][\w$]*)\(/,
       (_match, fn, nextFn) => `function ${fn}(e,t={}){return{...e,computerUse:!0,computerUseNodeRepl:!0}}function ${nextFn}(`,
       "main platform gate",
+      changes,
+    );
+    text = replaceOnce(
+      text,
+      new RegExp(
+        String.raw`\{name:(${idPattern()}),isAvailable:\(\{features:(${idPattern()}),platform:(${idPattern()})\}\)=>\3===` + "`darwin`" + String.raw`&&\2\.computerUse,migrate:(${idPattern()})\}`,
+      ),
+      "{forceReload:!0,installWhenMissing:!0,name:$1,isAvailable:({features:$2,platform:$3})=>$3===`darwin`&&$2.computerUse,migrate:$4}",
+      "main auto-install descriptor",
       changes,
     );
     if (changes.length > 0) {
@@ -176,6 +188,17 @@ async function patchUseModelSettings(root, summary) {
       );
     }
 
+    text = replaceOnce(
+      text,
+      new RegExp(
+        String.raw`function\s+(${idPattern()})\(e,\{isComputerUseAvailable:(${idPattern()}),isExternalBrowserUseAvailable:(${idPattern()}),isInAppBrowserUseAvailable:(${idPattern()})\}\)\{return!\(!\4&&(${idPattern()})\(e\)\|\|!\3&&(${idPattern()})\(e\)\|\|!\2&&(${idPattern()})\(e\)\)\}`,
+      ),
+      (_match, fn, computer, external, inApp, isBrowserUse, isExternalBrowser, _isComputerUse) =>
+        `function ${fn}(e,{isComputerUseAvailable:${computer},isExternalBrowserUseAvailable:${external},isInAppBrowserUseAvailable:${inApp}}){return!(!${inApp}&&${isBrowserUse}(e)||!${external}&&${isExternalBrowser}(e))}`,
+      "plugin availability filter",
+      changes,
+    );
+
     if (changes.length > 0) {
       await writeText(file, text);
       summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
@@ -199,7 +222,7 @@ async function patchInstallFlow(root, summary) {
     const changes = [];
     text = replaceOnce(
       text,
-      /if\((![A-Za-z_$][\w$]*&&[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.plugin\.id\))\)\{([A-Za-z_$][\w$]*)\(\);return\}/,
+      /if\((![A-Za-z_$][\w$]*&&[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.plugin\.id\))\)\{([A-Za-z_$][\w$]*)\(\);return\}/g,
       "if(!1&&$1){$2();return}",
       "install auth toast gate",
       changes,
@@ -208,6 +231,15 @@ async function patchInstallFlow(root, summary) {
       text,
       /openPluginInstall:\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)=\{\}\)=>\{([A-Za-z_$][\w$]*)\|\|![^&{}]+&&[A-Za-z_$][\w$]*\(\1\.plugin\.id\)\|\|\(([^{}]+?)\)\}/,
       "openPluginInstall:($1,$2={})=>{$3||($4)}",
+      "install modal gate",
+      changes,
+    );
+    text = replaceOnce(
+      text,
+      new RegExp(
+        String.raw`openPluginInstall:\((${idPattern()}),(${idPattern()})=\{\}\)=>\{(${idPattern()})\|\|![^|{}]+?\|\|![^|{}]+?\|\|![^|{}]+?\|\|\(`,
+      ),
+      "openPluginInstall:($1,$2={})=>{$3||(",
       "install modal gate",
       changes,
     );
@@ -270,6 +302,16 @@ async function patchComputerUseSettings(root, summary) {
         changes,
       );
     }
+    text = replaceOnce(
+      text,
+      new RegExp(
+        String.raw`let\s+(${idPattern()})=(${idPattern()})\((${idPattern()})\);if\((${idPattern()})\((${idPattern()})\)!=null\)`,
+      ),
+      (_match, availability, hook, args, routeMatch, route) =>
+        `let ${availability}={...${hook}(${args}),available:!0};if(${routeMatch}(${route})!=null)`,
+      "settings availability gate",
+      changes,
+    );
     if (changes.length > 0) {
       await writeText(file, text);
       summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
@@ -282,19 +324,70 @@ async function patchComputerUseSettings(root, summary) {
   }
 }
 
-async function ensureBundledMarketplace(appPath, summary) {
-  const marketplacePath = join(
-    appPath,
-    "Contents",
-    "Resources",
-    "plugins",
-    "openai-bundled",
-    ".agents",
-    "plugins",
-    "marketplace.json",
-  );
+async function patchSettingsNavAvailability(root, summary) {
+  const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
+  let patched = false;
+  let candidates = 0;
+  for (const file of assets) {
+    let text = await readText(file);
+    if (!text.includes("case`computer-use`:return")) continue;
+    candidates += 1;
+    const changes = [];
+    text = replaceOnce(
+      text,
+      /case`computer-use`:return[^;]+;/g,
+      "case`computer-use`:return!0;",
+      "settings nav computer-use availability",
+      changes,
+    );
+    if (changes.length > 0) {
+      await writeText(file, text);
+      summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
+      patched = true;
+    }
+  }
+  if (!patched) {
+    if (candidates > 0) summary.skipped.push("settings nav computer-use availability already patched");
+    else summary.missing.push("settings nav computer-use availability");
+  }
+}
+
+async function patchPluginSelectorFallback(root, summary) {
+  const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
+  let patched = false;
+  let candidates = 0;
+  for (const file of assets) {
+    let text = await readText(file);
+    if (!text.includes("plugin.id.split(`@`)[0]") || !text.includes("openai-curated")) continue;
+    candidates += 1;
+    const changes = [];
+    if (!text.includes("codexComputerUseSelectorFallback")) {
+      text = replaceOnce(
+        text,
+        new RegExp(
+          String.raw`function\s+(${idPattern()})\(e,(${idPattern()})\)\{let\s+(${idPattern()})=e\.filter\(e=>e\.plugin\.name===\2\|\|e\.plugin\.id\.split\(` + "`@`" + String.raw`\)\[0\]===\2\),(${idPattern()})=(${idPattern()})\((${idPattern()})\(\)\);return`,
+        ),
+        (_match, fn, name, filtered, preferred, normalize, source) =>
+          `${syntheticPluginFunction("codexComputerUseSelectorFallback")}function ${fn}(e,${name}){let ${filtered}=e.filter(e=>e.plugin.name===${name}||e.plugin.id.split(\`@\`)[0]===${name});${name}===\`computer-use\`&&${filtered}.length===0&&(${filtered}=[codexComputerUseSelectorFallback(),...${filtered}]);let ${preferred}=${normalize}(${source}());return`,
+        "selector fallback",
+        changes,
+      );
+    }
+    if (changes.length > 0) {
+      await writeText(file, text);
+      summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
+      patched = true;
+    }
+  }
+  if (!patched) {
+    if (candidates > 0) summary.skipped.push("plugin selector fallback already patched");
+    else summary.missing.push("plugin selector fallback");
+  }
+}
+
+async function ensureMarketplaceEntry(marketplacePath, summary, label) {
   if (!existsSync(marketplacePath)) {
-    summary.missing.push("bundled marketplace");
+    summary.missing.push(label);
     return;
   }
   const json = JSON.parse(await readText(marketplacePath));
@@ -307,9 +400,101 @@ async function ensureBundledMarketplace(appPath, summary) {
       source: { source: "local", path: "./plugins/computer-use" },
     });
     await writeText(marketplacePath, `${JSON.stringify(json, null, 2)}\n`);
-    summary.changed.push("plugins/openai-bundled/.agents/plugins/marketplace.json: computer-use entry");
+    summary.changed.push(`${label}: computer-use entry`);
   } else {
-    summary.skipped.push("bundled marketplace already has computer-use");
+    summary.skipped.push(`${label} already has computer-use`);
+  }
+}
+
+function bundledMarketplaceRoot(appPath) {
+  return join(appPath, "Contents", "Resources", "plugins", "openai-bundled");
+}
+
+async function ensureBundledMarketplace(appPath, summary) {
+  const marketplacePath = join(bundledMarketplaceRoot(appPath), ".agents", "plugins", "marketplace.json");
+  await ensureMarketplaceEntry(marketplacePath, summary, "bundled marketplace");
+}
+
+async function ensureRuntimeBundledMarketplace(appPath, summary) {
+  const sourceRoot = bundledMarketplaceRoot(appPath);
+  const sourcePlugin = join(sourceRoot, "plugins", "computer-use");
+  if (!existsSync(sourcePlugin)) {
+    summary.missing.push("bundled computer-use plugin");
+    return;
+  }
+
+  const codexHome = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  const runtimeRoot = join(codexHome, ".tmp", "bundled-marketplaces", "openai-bundled");
+  await mkdir(join(runtimeRoot, ".agents", "plugins"), { recursive: true });
+  await mkdir(join(runtimeRoot, "plugins"), { recursive: true });
+
+  const runtimeMarketplace = join(runtimeRoot, ".agents", "plugins", "marketplace.json");
+  if (!existsSync(runtimeMarketplace)) {
+    await cp(join(sourceRoot, ".agents", "plugins", "marketplace.json"), runtimeMarketplace);
+    summary.changed.push("runtime bundled marketplace: marketplace.json");
+  }
+
+  await cp(sourcePlugin, join(runtimeRoot, "plugins", "computer-use"), {
+    force: true,
+    recursive: true,
+    verbatimSymlinks: true,
+  });
+  summary.changed.push("runtime bundled marketplace: computer-use plugin");
+  await ensureMarketplaceEntry(runtimeMarketplace, summary, "runtime bundled marketplace");
+}
+
+function codexHomePath() {
+  return process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+}
+
+function upsertPluginEnabled(text, pluginId) {
+  const escaped = pluginId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const section = `[plugins."${pluginId}"]`;
+  const sectionPattern = new RegExp(
+    `(^|\\n)(\\[plugins\\."${escaped}"\\]\\n)([\\s\\S]*?)(?=\\n\\[|$)`,
+  );
+  const match = text.match(sectionPattern);
+  if (match) {
+    const body = match[3].match(/^enabled\s*=/m)
+      ? match[3].replace(/^enabled\s*=.*$/m, "enabled = true")
+      : `enabled = true\n${match[3]}`;
+    return text.replace(sectionPattern, `${match[1]}${match[2]}${body}`);
+  }
+
+  const browserSection = /\n\[plugins\."browser-use@openai-bundled"\]\nenabled = true\n?/;
+  if (browserSection.test(text)) {
+    return text.replace(browserSection, (existing) => `${existing}\n${section}\nenabled = true\n`);
+  }
+  return `${text.trimEnd()}\n\n${section}\nenabled = true\n`;
+}
+
+async function ensureUserPluginInstall(appPath, summary) {
+  const sourcePlugin = join(bundledMarketplaceRoot(appPath), "plugins", "computer-use");
+  const manifestPath = join(sourcePlugin, ".codex-plugin", "plugin.json");
+  if (!existsSync(manifestPath)) {
+    summary.missing.push("bundled computer-use manifest");
+    return;
+  }
+
+  const codexHome = codexHomePath();
+  const manifest = JSON.parse(await readText(manifestPath));
+  const cacheRoot = join(codexHome, "plugins", "cache", "openai-bundled", "computer-use", manifest.version);
+  await mkdir(dirname(cacheRoot), { recursive: true });
+  await cp(sourcePlugin, cacheRoot, { force: true, recursive: true, verbatimSymlinks: true });
+  summary.changed.push(`plugin cache: computer-use ${manifest.version}`);
+
+  const configPath = join(codexHome, "config.toml");
+  if (!existsSync(configPath)) {
+    summary.missing.push("Codex config.toml");
+    return;
+  }
+  const before = await readText(configPath);
+  const after = upsertPluginEnabled(before, "computer-use@openai-bundled");
+  if (after !== before) {
+    await writeText(configPath, after);
+    summary.changed.push("config.toml: enable computer-use plugin");
+  } else {
+    summary.skipped.push("config.toml already enables computer-use plugin");
   }
 }
 
@@ -386,7 +571,13 @@ async function main() {
     await patchInstallFlow(work, summary);
     await patchAuthDetailGate(work, summary);
     await patchComputerUseSettings(work, summary);
-    if (!options.dryRun) await ensureBundledMarketplace(appPath, summary);
+    await patchSettingsNavAvailability(work, summary);
+    await patchPluginSelectorFallback(work, summary);
+    if (!options.dryRun) {
+      await ensureBundledMarketplace(appPath, summary);
+      await ensureRuntimeBundledMarketplace(appPath, summary);
+      await ensureUserPluginInstall(appPath, summary);
+    }
 
     const changedJs = summary.changed
       .map((entry) => entry.split(":")[0])
