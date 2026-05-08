@@ -346,7 +346,9 @@ async function patchComputerUseSettings(root, summary) {
 }
 
 async function patchSettingsNavAvailability(root, summary) {
-  const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
+  const assets = (await listFiles(join(root, "webview", "assets"))).filter(
+    (file) => file.endsWith(".js") && relative(root, file).startsWith("webview/assets/settings-page-"),
+  );
   let patched = false;
   let candidates = 0;
   for (const file of assets) {
@@ -370,6 +372,34 @@ async function patchSettingsNavAvailability(root, summary) {
   if (!patched) {
     if (candidates > 0) summary.skipped.push("settings nav computer-use availability already patched");
     else summary.missing.push("settings nav computer-use availability");
+  }
+}
+
+async function patchComputerUseLabelRenderer(root, summary) {
+  const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
+  let patched = false;
+  let candidates = 0;
+  for (const file of assets) {
+    let text = await readText(file);
+    if (!text.includes("case`computer-use`:return")) continue;
+    candidates += 1;
+    const changes = [];
+    text = replaceOnce(
+      text,
+      /case`computer-use`:return!0;(?=default:return null\}\}function\s+[A-Za-z_$][\w$]*\()/,
+      "case`computer-use`:return zE;",
+      "computer-use label renderer repair",
+      changes,
+    );
+    if (changes.length > 0) {
+      await writeText(file, text);
+      summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
+      patched = true;
+    }
+  }
+  if (!patched) {
+    if (candidates > 0) summary.skipped.push("computer-use label renderer already valid");
+    else summary.missing.push("computer-use label renderer");
   }
 }
 
@@ -406,6 +436,86 @@ async function patchPluginSelectorFallback(root, summary) {
   }
 }
 
+async function patchMissingTurnStateItemTolerance(root, summary) {
+  const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
+  let patched = false;
+  let candidates = 0;
+  for (const file of assets) {
+    let text = await readText(file);
+    if (
+      !text.includes("Item not found in turn state")
+      && !text.includes("Rf(n,e.id,e.type)&&jl(n,o)")
+    ) {
+      continue;
+    }
+    candidates += 1;
+    const changes = [];
+
+    text = replaceOnce(
+      text,
+      /z\.error\(`Item not found in turn state`,\{safe:\{itemId:t\},sensitive:\{\}\}\)/,
+      "z.warning(`Item not found in turn state`,{safe:{itemId:t},sensitive:{}})",
+      "missing turn item warning",
+      changes,
+    );
+
+    text = replaceOnce(
+      text,
+      /Gp\(e\)&&\(n\.firstTurnWorkItemStartedAtMs=n\.firstTurnWorkItemStartedAtMs\?\?Date\.now\(\)\),Rf\(n,e\.id,e\.type\)&&jl\(n,o\)/,
+      "Gp(e)&&(n.firstTurnWorkItemStartedAtMs=n.firstTurnWorkItemStartedAtMs??Date.now()),n.items.some(t=>t.id===e.id)?Rf(n,e.id,e.type)&&jl(n,o):jl(n,o)",
+      "completed item upsert fallback",
+      changes,
+    );
+
+    if (changes.length > 0) {
+      await writeText(file, text);
+      summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
+      patched = true;
+    }
+  }
+  if (!patched) {
+    if (candidates > 0) summary.skipped.push("missing turn item tolerance already patched");
+    else summary.missing.push("missing turn item tolerance");
+  }
+}
+
+async function patchComputerUseToolRowFallback(root, summary) {
+  const assets = (await listFiles(join(root, "webview", "assets"))).filter((file) => file.endsWith(".js"));
+  let patched = false;
+  let candidates = 0;
+  for (const file of assets) {
+    let text = await readText(file);
+    if (!text.includes("computer-use-tool-row-display-name")) continue;
+    candidates += 1;
+    const changes = [];
+
+    text = replaceOnce(
+      text,
+      /g=e\.invocation\.server===`computer-use`,_=g\?([A-Za-z_$][\w$]*)\(e\.invocation\.arguments\):null,v=g&&_==null\?([A-Za-z_$][\w$]*)\(e\.invocation\.arguments\):null,\{data:y\}=([A-Za-z_$][\w$]*)\(CS,_\),\{data:b\}=\3\(wS,v\),x=y\?\?b\?\?null,\{iconSmall:S\}=([A-Za-z_$][\w$]*)\(\{appPath:x\?\.appPath\?\?null\}\)/,
+      "g=!1,_=null,v=null,{data:y}={data:null},{data:b}={data:null},x=null,{iconSmall:S}={iconSmall:null}",
+      "computer-use generic tool row",
+      changes,
+    );
+    text = replaceOnce(
+      text,
+      /g=!1,_=null,v=null,\{data:y\}=([A-Za-z_$][\w$]*)\(CS,_\),\{data:b\}=\1\(wS,v\),x=null,\{iconSmall:S\}=([A-Za-z_$][\w$]*)\(\{appPath:x\?\.appPath\?\?null\}\)/,
+      "g=!1,_=null,v=null,{data:y}={data:null},{data:b}={data:null},x=null,{iconSmall:S}={iconSmall:null}",
+      "computer-use generic tool row",
+      changes,
+    );
+
+    if (changes.length > 0) {
+      await writeText(file, text);
+      summary.changed.push(`${relative(root, file)}: ${[...new Set(changes)].join(", ")}`);
+      patched = true;
+    }
+  }
+  if (!patched) {
+    if (candidates > 0) summary.skipped.push("computer-use tool row fallback already patched");
+    else summary.missing.push("computer-use tool row fallback");
+  }
+}
+
 async function ensureMarketplaceEntry(marketplacePath, summary, label) {
   if (!existsSync(marketplacePath)) {
     summary.missing.push(label);
@@ -431,6 +541,18 @@ function bundledMarketplaceRoot(appPath) {
   return join(appPath, "Contents", "Resources", "plugins", "openai-bundled");
 }
 
+function bundledComputerUsePlugin(appPath) {
+  return join(bundledMarketplaceRoot(appPath), "plugins", "computer-use");
+}
+
+function computerUseAppPath(pluginRoot) {
+  return join(pluginRoot, "Codex Computer Use.app");
+}
+
+function computerUseClientPath(appRoot) {
+  return join(appRoot, "Contents", "SharedSupport", "SkyComputerUseClient.app", "Contents", "MacOS", "SkyComputerUseClient");
+}
+
 async function ensureBundledMarketplace(appPath, summary) {
   const marketplacePath = join(bundledMarketplaceRoot(appPath), ".agents", "plugins", "marketplace.json");
   await ensureMarketplaceEntry(marketplacePath, summary, "bundled marketplace");
@@ -438,7 +560,7 @@ async function ensureBundledMarketplace(appPath, summary) {
 
 async function ensureRuntimeBundledMarketplace(appPath, summary) {
   const sourceRoot = bundledMarketplaceRoot(appPath);
-  const sourcePlugin = join(sourceRoot, "plugins", "computer-use");
+  const sourcePlugin = bundledComputerUsePlugin(appPath);
   if (!existsSync(sourcePlugin)) {
     summary.missing.push("bundled computer-use plugin");
     return;
@@ -468,8 +590,16 @@ function codexHomePath() {
   return process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 }
 
+function stableComputerUseAppPath() {
+  return join(codexHomePath(), "computer-use", "Codex Computer Use.app");
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function upsertPluginEnabled(text, pluginId) {
-  const escaped = pluginId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = escapeRegExp(pluginId);
   const section = `[plugins."${pluginId}"]`;
   const sectionPattern = new RegExp(
     `(^|\\n)(\\[plugins\\."${escaped}"\\]\\n)([\\s\\S]*?)(?=\\n\\[|$)`,
@@ -489,8 +619,50 @@ function upsertPluginEnabled(text, pluginId) {
   return `${text.trimEnd()}\n\n${section}\nenabled = true\n`;
 }
 
+function upsertFeaturesComputerUse(text) {
+  const sectionPattern = /(^|\n)(\[features\]\n)([\s\S]*?)(?=\n\[|$)/;
+  const match = text.match(sectionPattern);
+  if (match) {
+    const body = match[3].match(/^computer_use\s*=/m)
+      ? match[3].replace(/^computer_use\s*=.*$/m, "computer_use = true")
+      : `${match[3].trimEnd()}\ncomputer_use = true\n`;
+    return text.replace(sectionPattern, `${match[1]}${match[2]}${body}`);
+  }
+  return `${text.trimEnd()}\n\n[features]\ncomputer_use = true\n`;
+}
+
+function upsertComputerUseNotify(text, clientPath) {
+  const notifyLine = `notify = ${JSON.stringify([clientPath, "turn-ended"])}`;
+  const notifyPattern = /(^|\n)notify\s*=\s*\[[^\n]*\]/;
+  if (notifyPattern.test(text)) {
+    return text.replace(notifyPattern, `$1${notifyLine}`);
+  }
+
+  const firstSection = text.match(/(^|\n)\[/);
+  if (!firstSection) return `${text.trimEnd()}\n${notifyLine}\n`;
+  const index = firstSection.index + (firstSection[0].startsWith("\n") ? 1 : 0);
+  const prefix = text.slice(0, index).trimEnd();
+  const suffix = text.slice(index);
+  return `${prefix}${prefix ? "\n" : ""}${notifyLine}\n${suffix}`;
+}
+
+async function ensureStableComputerUseInstall(appPath, summary) {
+  const sourceApp = computerUseAppPath(bundledComputerUsePlugin(appPath));
+  if (!existsSync(sourceApp)) {
+    summary.missing.push("bundled Codex Computer Use.app");
+    return null;
+  }
+
+  const targetApp = stableComputerUseAppPath();
+  await rm(targetApp, { recursive: true, force: true });
+  await mkdir(dirname(targetApp), { recursive: true });
+  run("ditto", [sourceApp, targetApp]);
+  summary.changed.push("stable computer-use app");
+  return targetApp;
+}
+
 async function ensureUserPluginInstall(appPath, summary) {
-  const sourcePlugin = join(bundledMarketplaceRoot(appPath), "plugins", "computer-use");
+  const sourcePlugin = bundledComputerUsePlugin(appPath);
   const manifestPath = join(sourcePlugin, ".codex-plugin", "plugin.json");
   if (!existsSync(manifestPath)) {
     summary.missing.push("bundled computer-use manifest");
@@ -510,12 +682,17 @@ async function ensureUserPluginInstall(appPath, summary) {
     return;
   }
   const before = await readText(configPath);
-  const after = upsertPluginEnabled(before, "computer-use@openai-bundled");
+  const stableApp = stableComputerUseAppPath();
+  const stableClient = computerUseClientPath(stableApp);
+  const after = upsertComputerUseNotify(
+    upsertFeaturesComputerUse(upsertPluginEnabled(before, "computer-use@openai-bundled")),
+    stableClient,
+  );
   if (after !== before) {
     await writeText(configPath, after);
-    summary.changed.push("config.toml: enable computer-use plugin");
+    summary.changed.push("config.toml: enable computer-use runtime");
   } else {
-    summary.skipped.push("config.toml already enables computer-use plugin");
+    summary.skipped.push("config.toml already enables computer-use runtime");
   }
 }
 
@@ -606,10 +783,14 @@ async function main() {
     await patchAuthDetailGate(work, summary);
     await patchComputerUseSettings(work, summary);
     await patchSettingsNavAvailability(work, summary);
+    await patchComputerUseLabelRenderer(work, summary);
     await patchPluginSelectorFallback(work, summary);
+    await patchMissingTurnStateItemTolerance(work, summary);
+    await patchComputerUseToolRowFallback(work, summary);
     if (!options.dryRun) {
       await ensureBundledMarketplace(appPath, summary);
       await ensureRuntimeBundledMarketplace(appPath, summary);
+      await ensureStableComputerUseInstall(appPath, summary);
       await ensureUserPluginInstall(appPath, summary);
     }
 
