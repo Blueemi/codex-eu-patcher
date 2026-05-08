@@ -70,3 +70,13 @@ If you intentionally want to skip stages:
 Re-signing changes app identity from Keychain's perspective, so `Codex Safe Storage` access may prompt again.
 
 If you trust the patched app, enter your login keychain password and choose `Always Allow`.
+
+### `computer-use` works in chat but is missing in Plugin Store search
+
+The Plugin Store list/search and in-chat tool availability are separate paths. On some builds, `computer-use` can be usable in chat even if the store UI does not show a searchable card.
+
+Quick check:
+
+1. Start a new chat.
+2. Try invoking Computer Use directly from chat/tool picker.
+3. If it is available there, plugin load is successful even if store search is empty.
